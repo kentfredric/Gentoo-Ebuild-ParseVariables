@@ -1,6 +1,6 @@
-# Copyright 1999-2012 Gentoo Foundation
+# Copyright 1999-2015 Gentoo Foundation
 # Distributed under the terms of the GNU General Public License v2
-# $Header: /var/cvsroot/gentoo-x86/eclass/eutils.eclass,v 1.400 2012/06/20 09:26:50 mgorny Exp $
+# $Header: /var/cvsroot/gentoo-x86/eclass/eutils.eclass,v 1.444 2015/03/20 18:28:11 vapier Exp $
 
 # @ECLASS: eutils.eclass
 # @MAINTAINER:
@@ -15,12 +15,10 @@
 # Due to the nature of this eclass, some functions may have maintainers
 # different from the overall eclass!
 
-if [[ ${___ECLASS_ONCE_EUTILS} != "recur -_+^+_- spank" ]] ; then
-___ECLASS_ONCE_EUTILS="recur -_+^+_- spank"
+if [[ -z ${_EUTILS_ECLASS} ]]; then
+_EUTILS_ECLASS=1
 
-inherit multilib toolchain-funcs user
-
-DESCRIPTION="Based on the ${ECLASS} eclass"
+inherit multilib toolchain-funcs
 
 if has "${EAPI:-0}" 0 1 2; then
 
@@ -116,7 +114,7 @@ esvn_clean() {
 # @CODE
 estack_push() {
 	[[ $# -eq 0 ]] && die "estack_push: incorrect # of arguments"
-	local stack_name="__ESTACK_$1__" ; shift
+	local stack_name="_ESTACK_$1_" ; shift
 	eval ${stack_name}+=\( \"\$@\" \)
 }
 
@@ -129,23 +127,94 @@ estack_push() {
 estack_pop() {
 	[[ $# -eq 0 || $# -gt 2 ]] && die "estack_pop: incorrect # of arguments"
 
-	# We use the fugly __estack_xxx var names to avoid collision with
+	# We use the fugly _estack_xxx var names to avoid collision with
 	# passing back the return value.  If we used "local i" and the
 	# caller ran `estack_pop ... i`, we'd end up setting the local
-	# copy of "i" rather than the caller's copy.  The __estack_xxx
+	# copy of "i" rather than the caller's copy.  The _estack_xxx
 	# garbage is preferable to using $1/$2 everywhere as that is a
 	# bit harder to read.
-	local __estack_name="__ESTACK_$1__" ; shift
-	local __estack_retvar=$1 ; shift
-	eval local __estack_i=\${#${__estack_name}\[@\]}
+	local _estack_name="_ESTACK_$1_" ; shift
+	local _estack_retvar=$1 ; shift
+	eval local _estack_i=\${#${_estack_name}\[@\]}
 	# Don't warn -- let the caller interpret this as a failure
 	# or as normal behavior (akin to `shift`)
-	[[ $(( --__estack_i )) -eq -1 ]] && return 1
+	[[ $(( --_estack_i )) -eq -1 ]] && return 1
 
-	if [[ -n ${__estack_retvar} ]] ; then
-		eval ${__estack_retvar}=\"\${${__estack_name}\[${__estack_i}\]}\"
+	if [[ -n ${_estack_retvar} ]] ; then
+		eval ${_estack_retvar}=\"\${${_estack_name}\[${_estack_i}\]}\"
 	fi
-	eval unset ${__estack_name}\[${__estack_i}\]
+	eval unset ${_estack_name}\[${_estack_i}\]
+}
+
+# @FUNCTION: evar_push
+# @USAGE: <variable to save> [more vars to save]
+# @DESCRIPTION:
+# This let's you temporarily modify a variable and then restore it (including
+# set vs unset semantics).  Arrays are not supported at this time.
+#
+# This is meant for variables where using `local` does not work (such as
+# exported variables, or only temporarily changing things in a func).
+#
+# For example:
+# @CODE
+#		evar_push LC_ALL
+#		export LC_ALL=C
+#		... do some stuff that needs LC_ALL=C set ...
+#		evar_pop
+#
+#		# You can also save/restore more than one var at a time
+#		evar_push BUTTERFLY IN THE SKY
+#		... do stuff with the vars ...
+#		evar_pop     # This restores just one var, SKY
+#		... do more stuff ...
+#		evar_pop 3   # This pops the remaining 3 vars
+# @CODE
+evar_push() {
+	local var val
+	for var ; do
+		[[ ${!var+set} == "set" ]] \
+			&& val=${!var} \
+			|| val="unset_76fc3c462065bb4ca959f939e6793f94"
+		estack_push evar "${var}" "${val}"
+	done
+}
+
+# @FUNCTION: evar_push_set
+# @USAGE: <variable to save> [new value to store]
+# @DESCRIPTION:
+# This is a handy shortcut to save and temporarily set a variable.  If a value
+# is not specified, the var will be unset.
+evar_push_set() {
+	local var=$1
+	evar_push ${var}
+	case $# in
+	1) unset ${var} ;;
+	2) printf -v "${var}" '%s' "$2" ;;
+	*) die "${FUNCNAME}: incorrect # of args: $*" ;;
+	esac
+}
+
+# @FUNCTION: evar_pop
+# @USAGE: [number of vars to restore]
+# @DESCRIPTION:
+# Restore the variables to the state saved with the corresponding
+# evar_push call.  See that function for more details.
+evar_pop() {
+	local cnt=${1:-bad}
+	case $# in
+	0) cnt=1 ;;
+	1) isdigit "${cnt}" || die "${FUNCNAME}: first arg must be a number: $*" ;;
+	*) die "${FUNCNAME}: only accepts one arg: $*" ;;
+	esac
+
+	local var val
+	while (( cnt-- )) ; do
+		estack_pop evar val || die "${FUNCNAME}: unbalanced push"
+		estack_pop evar var || die "${FUNCNAME}: unbalanced push"
+		[[ ${val} == "unset_76fc3c462065bb4ca959f939e6793f94" ]] \
+			&& unset ${var} \
+			|| printf -v "${var}" '%s' "${val}"
+	done
 }
 
 # @FUNCTION: eshopts_push
@@ -162,7 +231,7 @@ estack_pop() {
 # A common example is to disable shell globbing so that special meaning/care
 # may be used with variables/arguments to custom functions.  That would be:
 # @CODE
-#		eshopts_push -s noglob
+#		eshopts_push -o noglob
 #		for x in ${foo} ; do
 #			if ...some check... ; then
 #				eshopts_pop
@@ -179,7 +248,7 @@ eshopts_push() {
 	else
 		estack_push eshopts $-
 		[[ $# -eq 0 ]] && return 0
-		set "${@/c}" || die "${FUNCNAME}: bad options to set: $*"
+		set "$@" || die "${FUNCNAME}: bad options to set: $*"
 	fi
 }
 
@@ -194,8 +263,8 @@ eshopts_pop() {
 	if [[ ${s} == "shopt -"* ]] ; then
 		eval "${s}" || die "${FUNCNAME}: sanity: invalid shopt options: ${s}"
 	else
-		set +${-/c}     || die "${FUNCNAME}: sanity: invalid shell settings: $-"
-		set -${s/c}   || die "${FUNCNAME}: sanity: unable to restore saved shell settings: ${s}"
+		set +$-     || die "${FUNCNAME}: sanity: invalid shell settings: $-"
+		set -${s}   || die "${FUNCNAME}: sanity: unable to restore saved shell settings: ${s}"
 	fi
 }
 
@@ -218,6 +287,18 @@ eumask_pop() {
 	local s
 	estack_pop eumask s || die "${FUNCNAME}: unbalanced push"
 	umask ${s} || die "${FUNCNAME}: sanity: could not restore umask: ${s}"
+}
+
+# @FUNCTION: isdigit
+# @USAGE: <number> [more numbers]
+# @DESCRIPTION:
+# Return true if all arguments are numbers.
+isdigit() {
+	local d
+	for d ; do
+		[[ ${d:-bad} == *[!0-9]* ]] && return 1
+	done
+	return 0
 }
 
 # @VARIABLE: EPATCH_SOURCE
@@ -263,6 +344,11 @@ EPATCH_MULTI_MSG="Applying various patches (bugfixes/updates) ..."
 # Only require patches to match EPATCH_SUFFIX rather than the extended
 # arch naming style.
 EPATCH_FORCE="no"
+# @VARIABLE: EPATCH_USER_EXCLUDE
+# @DEFAULT_UNSET
+# @DESCRIPTION:
+# List of patches not to apply.	 Note this is only file names,
+# and not the full path.  Globs accepted.
 
 # @FUNCTION: epatch
 # @USAGE: [options] [patches] [dirs of patches]
@@ -270,7 +356,7 @@ EPATCH_FORCE="no"
 # epatch is designed to greatly simplify the application of patches.  It can
 # process patch files directly, or directories of patches.  The patches may be
 # compressed (bzip/gzip/etc...) or plain text.  You generally need not specify
-# the -p option as epatch will automatically attempt -p0 to -p5 until things
+# the -p option as epatch will automatically attempt -p0 to -p4 until things
 # apply successfully.
 #
 # If you do not specify any patches/dirs, then epatch will default to the
@@ -341,8 +427,11 @@ epatch() {
 		local EPATCH_SUFFIX=$1
 
 	elif [[ -d $1 ]] ; then
-		# Some people like to make dirs of patches w/out suffixes (vim)
+		# We have to force sorting to C so that the wildcard expansion is consistent #471666.
+		evar_push_set LC_COLLATE C
+		# Some people like to make dirs of patches w/out suffixes (vim).
 		set -- "$1"/*${EPATCH_SUFFIX:+."${EPATCH_SUFFIX}"}
+		evar_pop
 
 	elif [[ -f ${EPATCH_SOURCE}/$1 ]] ; then
 		# Re-use EPATCH_SOURCE as a search dir
@@ -400,13 +489,22 @@ epatch() {
 		fi
 
 		# Let people filter things dynamically
-		if [[ -n ${EPATCH_EXCLUDE} ]] ; then
+		if [[ -n ${EPATCH_EXCLUDE}${EPATCH_USER_EXCLUDE} ]] ; then
 			# let people use globs in the exclude
 			eshopts_push -o noglob
 
 			local ex
 			for ex in ${EPATCH_EXCLUDE} ; do
 				if [[ ${patchname} == ${ex} ]] ; then
+					einfo "  Skipping ${patchname} due to EPATCH_EXCLUDE ..."
+					eshopts_pop
+					continue 2
+				fi
+			done
+
+			for ex in ${EPATCH_USER_EXCLUDE} ; do
+				if [[ ${patchname} == ${ex} ]] ; then
+					einfo "  Skipping ${patchname} due to EPATCH_USER_EXCLUDE ..."
 					eshopts_pop
 					continue 2
 				fi
@@ -425,6 +523,10 @@ epatch() {
 			einfo "  ${patchname} ..."
 		fi
 
+		# Handle aliased patch command #404447 #461568
+		local patch="patch"
+		eval $(alias patch 2>/dev/null | sed 's:^alias ::')
+
 		# most of the time, there will only be one run per unique name,
 		# but if there are more, make sure we get unique log filenames
 		local STDERR_TARGET="${T}/${patchname}.out"
@@ -432,7 +534,13 @@ epatch() {
 			STDERR_TARGET="${T}/${patchname}-$$.out"
 		fi
 
-		printf "***** %s *****\nPWD: %s\n\n" "${patchname}" "${PWD}" > "${STDERR_TARGET}"
+		printf "***** %s *****\nPWD: %s\nPATCH TOOL: %s -> %s\nVERSION INFO:\n%s\n\n" \
+			"${patchname}" \
+			"${PWD}" \
+			"${patch}" \
+			"$(type -P "${patch}")" \
+			"$(${patch} --version)" \
+			> "${STDERR_TARGET}"
 
 		# Decompress the patch if need be
 		local count=0
@@ -464,15 +572,20 @@ epatch() {
 		# Similar reason, but with relative paths.
 		local rel_paths=$(egrep -n '^[-+]{3} [^	]*[.][.]/' "${PATCH_TARGET}")
 		if [[ -n ${rel_paths} ]] ; then
-			eqawarn "QA Notice: Your patch uses relative paths '../'."
-			eqawarn " In the future this will cause a failure."
-			eqawarn "${rel_paths}"
+			echo
+			eerror "Rejected Patch: ${patchname} !"
+			eerror " ( ${PATCH_TARGET} )"
+			eerror
+			eerror "Your patch uses relative paths '../':"
+			eerror "${rel_paths}"
+			echo
+			die "you need to fix the relative paths in patch"
 		fi
 
 		# Dynamically detect the correct -p# ... i'm lazy, so shoot me :/
 		local patch_cmd
 		while [[ ${count} -lt 5 ]] ; do
-			patch_cmd="${BASH_ALIASES[patch]:-patch} -p${count} ${EPATCH_OPTS}"
+			patch_cmd="${patch} -p${count} ${EPATCH_OPTS}"
 
 			# Generate some useful debug info ...
 			(
@@ -553,7 +666,7 @@ epatch() {
 # @USAGE:
 # @DESCRIPTION:
 # Applies user-provided patches to the source tree. The patches are
-# taken from /etc/portage/patches/<CATEGORY>/<PF|P|PN>/, where the first
+# taken from /etc/portage/patches/<CATEGORY>/<P-PR|P|PN>[:SLOT]/, where the first
 # of these three directories to exist will be the one to use, ignoring
 # any more general directories which might exist as well. They must end
 # in ".patch" to be applied.
@@ -585,7 +698,7 @@ epatch_user() {
 
 	# don't clobber any EPATCH vars that the parent might want
 	local EPATCH_SOURCE check base=${PORTAGE_CONFIGROOT%/}/etc/portage/patches
-	for check in ${CATEGORY}/{${P}-${PR},${P},${PN}}; do
+	for check in ${CATEGORY}/{${P}-${PR},${P},${PN}}{,:${SLOT}}; do
 		EPATCH_SOURCE=${base}/${CTARGET}/${check}
 		[[ -r ${EPATCH_SOURCE} ]] || EPATCH_SOURCE=${base}/${CHOST}/${check}
 		[[ -r ${EPATCH_SOURCE} ]] || EPATCH_SOURCE=${base}/${check}
@@ -596,11 +709,20 @@ epatch_user() {
 			EPATCH_MULTI_MSG="Applying user patches from ${EPATCH_SOURCE} ..." \
 			epatch
 			echo "${EPATCH_SOURCE}" > "${applied}"
+			has epatch_user_death_notice ${EBUILD_DEATH_HOOKS} || EBUILD_DEATH_HOOKS+=" epatch_user_death_notice"
 			return 0
 		fi
 	done
 	echo "none" > "${applied}"
 	return 1
+}
+# @FUNCTION: epatch_user_death_notice
+# @INTERNAL
+# @DESCRIPTION:
+# Include an explicit notice in the die message itself that user patches were
+# applied to this build.
+epatch_user_death_notice() {
+	ewarn "!!! User patches were applied to this build!"
 }
 
 # @FUNCTION: emktemp
@@ -658,7 +780,7 @@ edos2unix() {
 # @CODE
 # binary:   what command does the app run with ?
 # name:     the name that will show up in the menu
-# icon:     give your little like a pretty little icon ...
+# icon:     the icon to use in the menu entry
 #           this can be relative (to /usr/share/pixmaps) or
 #           a full path to an icon
 # type:     what kind of application is this?
@@ -797,10 +919,11 @@ make_desktop_entry() {
 				;;
 		esac
 	fi
-	if [ "${SLOT}" == "0" ] ; then
+	local slot=${SLOT%/*}
+	if [[ ${slot} == "0" ]] ; then
 		local desktop_name="${PN}"
 	else
-		local desktop_name="${PN}-${SLOT}"
+		local desktop_name="${PN}-${slot}"
 	fi
 	local desktop="${T}/$(echo ${exec} | sed 's:[[:space:]/:]:_:g')-${desktop_name}.desktop"
 	#local desktop=${T}/${exec%% *:-${desktop_name}}.desktop
@@ -842,6 +965,14 @@ make_desktop_entry() {
 	) || die "installing desktop file failed"
 }
 
+# @FUNCTION: _eutils_eprefix_init
+# @INTERNAL
+# @DESCRIPTION:
+# Initialized prefix variables for EAPI<3.
+_eutils_eprefix_init() {
+	has "${EAPI:-0}" 0 1 2 && : ${ED:=${D}} ${EPREFIX:=} ${EROOT:=${ROOT}}
+}
+
 # @FUNCTION: validate_desktop_entries
 # @USAGE: [directories]
 # @MAINTAINER:
@@ -849,11 +980,12 @@ make_desktop_entry() {
 # @DESCRIPTION:
 # Validate desktop entries using desktop-file-utils
 validate_desktop_entries() {
-	if [[ -x /usr/bin/desktop-file-validate ]] ; then
+	_eutils_eprefix_init
+	if [[ -x "${EPREFIX}"/usr/bin/desktop-file-validate ]] ; then
 		einfo "Checking desktop entry validity"
 		local directories=""
 		for d in /usr/share/applications $@ ; do
-			[[ -d ${D}${d} ]] && directories="${directories} ${D}${d}"
+			[[ -d ${ED}${d} ]] && directories="${directories} ${ED}${d}"
 		done
 		if [[ -n ${directories} ]] ; then
 			for FILE in $(find ${directories} -name "*\.desktop" \
@@ -861,7 +993,7 @@ validate_desktop_entries() {
 			do
 				local temp=$(desktop-file-validate ${FILE} | grep -v "warning:" | \
 								sed -e "s|error: ||" -e "s|${FILE}:|--|g" )
-				[[ -n $temp ]] && elog ${temp/--/${FILE/${D}/}:}
+				[[ -n $temp ]] && elog ${temp/--/${FILE/${ED}/}:}
 			done
 		fi
 		echo ""
@@ -966,7 +1098,7 @@ _iconins() {
 				size=${2}
 			fi
 			case ${size} in
-			16|22|24|32|36|48|64|72|96|128|192|256)
+			16|22|24|32|36|48|64|72|96|128|192|256|512)
 				size=${size}x${size};;
 			scalable)
 				;;
@@ -1054,7 +1186,7 @@ doicon() {
 # results in: insinto /usr/share/pixmaps
 #             newins foobar.png NEWNAME.png
 #
-# example 2: newicon -s 48 foobar.png NEWNAME.png 
+# example 2: newicon -s 48 foobar.png NEWNAME.png
 # results in: insinto /usr/share/icons/hicolor/48x48/apps
 #             newins foobar.png NEWNAME.png
 # @CODE
@@ -1121,6 +1253,7 @@ strip-linguas() {
 # solution, so instead you can call this from pkg_preinst.  See also the
 # preserve_old_lib_notify function.
 preserve_old_lib() {
+	_eutils_eprefix_init
 	if [[ ${EBUILD_PHASE} != "preinst" ]] ; then
 		eerror "preserve_old_lib() must be called from pkg_preinst() only"
 		die "Invalid preserve_old_lib() usage"
@@ -1132,11 +1265,11 @@ preserve_old_lib() {
 
 	local lib dir
 	for lib in "$@" ; do
-		[[ -e ${ROOT}/${lib} ]] || continue
+		[[ -e ${EROOT}/${lib} ]] || continue
 		dir=${lib%/*}
 		dodir ${dir} || die "dodir ${dir} failed"
-		cp "${ROOT}"/${lib} "${D}"/${lib} || die "cp ${lib} failed"
-		touch "${D}"/${lib}
+		cp "${EROOT}"/${lib} "${ED}"/${lib} || die "cp ${lib} failed"
+		touch "${ED}"/${lib}
 	done
 }
 
@@ -1153,9 +1286,11 @@ preserve_old_lib_notify() {
 	# let portage worry about it
 	has preserve-libs ${FEATURES} && return 0
 
+	_eutils_eprefix_init
+
 	local lib notice=0
 	for lib in "$@" ; do
-		[[ -e ${ROOT}/${lib} ]] || continue
+		[[ -e ${EROOT}/${lib} ]] || continue
 		if [[ ${notice} -eq 0 ]] ; then
 			notice=1
 			ewarn "Old versions of installed libraries were detected on your system."
@@ -1191,6 +1326,7 @@ preserve_old_lib_notify() {
 # Remember that this function isn't terribly intelligent so order of optional
 # flags matter.
 built_with_use() {
+	_eutils_eprefix_init
 	local hidden="no"
 	if [[ $1 == "--hidden" ]] ; then
 		hidden="yes"
@@ -1214,8 +1350,8 @@ built_with_use() {
 	[[ -z ${PKG} ]] && die "Unable to resolve $1 to an installed package"
 	shift
 
-	local USEFILE=${ROOT}/var/db/pkg/${PKG}/USE
-	local IUSEFILE=${ROOT}/var/db/pkg/${PKG}/IUSE
+	local USEFILE=${EROOT}/var/db/pkg/${PKG}/USE
+	local IUSEFILE=${EROOT}/var/db/pkg/${PKG}/IUSE
 
 	# if the IUSE file doesn't exist, the read will error out, we need to handle
 	# this gracefully
@@ -1271,10 +1407,19 @@ epunt_cxx() {
 	local dir=$1
 	[[ -z ${dir} ]] && dir=${S}
 	ebegin "Removing useless C++ checks"
-	local f
-	find "${dir}" -name configure | while read f ; do
-		patch --no-backup-if-mismatch -p0 "${f}" "${PORTDIR}/eclass/ELT-patches/nocxx/nocxx.patch" > /dev/null
-	done
+	local f p any_found
+	while IFS= read -r -d '' f; do
+		for p in "${PORTDIR}"/eclass/ELT-patches/nocxx/*.patch ; do
+			if patch --no-backup-if-mismatch -p1 "${f}" "${p}" >/dev/null ; then
+				any_found=1
+				break
+			fi
+		done
+	done < <(find "${dir}" -name configure -print0)
+
+	if [[ -z ${any_found} ]]; then
+		eqawarn "epunt_cxx called unnecessarily (no C++ checks to punt)."
+	fi
 	eend 0
 }
 
@@ -1286,23 +1431,34 @@ epunt_cxx() {
 # first optionally setting LD_LIBRARY_PATH to the colon-delimited
 # libpaths followed by optionally changing directory to chdir.
 make_wrapper() {
+	_eutils_eprefix_init
 	local wrapper=$1 bin=$2 chdir=$3 libdir=$4 path=$5
 	local tmpwrapper=$(emktemp)
-	# We don't want to quote ${bin} so that people can pass complex
-	# things as $bin ... "./someprog --args"
-	cat << EOF > "${tmpwrapper}"
-#!/bin/sh
-cd "${chdir:-.}"
-if [ -n "${libdir}" ] ; then
-	if [ "\${LD_LIBRARY_PATH+set}" = "set" ] ; then
-		export LD_LIBRARY_PATH="\${LD_LIBRARY_PATH}:${libdir}"
-	else
-		export LD_LIBRARY_PATH="${libdir}"
+
+	(
+	echo '#!/bin/sh'
+	[[ -n ${chdir} ]] && printf 'cd "%s"\n' "${EPREFIX}${chdir}"
+	if [[ -n ${libdir} ]] ; then
+		local var
+		if [[ ${CHOST} == *-darwin* ]] ; then
+			var=DYLD_LIBRARY_PATH
+		else
+			var=LD_LIBRARY_PATH
+		fi
+		cat <<-EOF
+			if [ "\${${var}+set}" = "set" ] ; then
+				export ${var}="\${${var}}:${EPREFIX}${libdir}"
+			else
+				export ${var}="${EPREFIX}${libdir}"
+			fi
+		EOF
 	fi
-fi
-exec ${bin} "\$@"
-EOF
+	# We don't want to quote ${bin} so that people can pass complex
+	# things as ${bin} ... "./someprog --args"
+	printf 'exec %s "$@"\n' "${bin/#\//${EPREFIX}/}"
+	) > "${tmpwrapper}"
 	chmod go+rx "${tmpwrapper}"
+
 	if [[ -n ${path} ]] ; then
 		(
 		exeinto "${path}"
@@ -1373,12 +1529,16 @@ use_if_iuse() {
 # @FUNCTION: usex
 # @USAGE: <USE flag> [true output] [false output] [true suffix] [false suffix]
 # @DESCRIPTION:
+# Proxy to declare usex for package managers or EAPIs that do not provide it
+# and use the package manager implementation when available (i.e. EAPI >= 5).
 # If USE flag is set, echo [true output][true suffix] (defaults to "yes"),
 # otherwise echo [false output][false suffix] (defaults to "no").
-usex() { use "$1" && echo "${2-yes}$4" || echo "${3-no}$5" ; } #382963
+if has "${EAPI:-0}" 0 1 2 3 4; then
+	usex() { use "$1" && echo "${2-yes}$4" || echo "${3-no}$5" ; } #382963
+fi
 
 # @FUNCTION: prune_libtool_files
-# @USAGE: [--all]
+# @USAGE: [--all|--modules]
 # @DESCRIPTION:
 # Locate unnecessary libtool files (.la) and libtool static archives
 # (.a) and remove them from installation image.
@@ -1387,92 +1547,248 @@ usex() { use "$1" && echo "${2-yes}$4" || echo "${3-no}$5" ; } #382963
 # either be performed using pkg-config or doesn't introduce additional
 # flags.
 #
-# If '--all' argument is passed, all .la files are removed. This is
-# usually useful when the package installs plugins and does not use .la
-# files for loading them.
+# If '--modules' argument is passed, .la files for modules (plugins) are
+# removed as well. This is usually useful when the package installs
+# plugins and the plugin loader does not use .la files.
+#
+# If '--all' argument is passed, all .la files are removed without
+# performing any heuristic on them. You shouldn't ever use that,
+# and instead report a bug in the algorithm instead.
 #
 # The .a files are only removed whenever corresponding .la files state
 # that they should not be linked to, i.e. whenever these files
 # correspond to plugins.
 #
-# Note: if your package installs any .pc files, this function implicitly
-# calls pkg-config. You should add it to your DEPEND in that case.
+# Note: if your package installs both static libraries and .pc files
+# which use variable substitution for -l flags, you need to add
+# pkg-config to your DEPEND.
 prune_libtool_files() {
 	debug-print-function ${FUNCNAME} "$@"
 
-	local removing_all opt
+	local removing_all removing_modules opt
+	_eutils_eprefix_init
 	for opt; do
 		case "${opt}" in
 			--all)
 				removing_all=1
+				removing_modules=1
+				;;
+			--modules)
+				removing_modules=1
 				;;
 			*)
 				die "Invalid argument to ${FUNCNAME}(): ${opt}"
 		esac
 	done
 
-	# Create a list of all .pc-covered libs.
-	local pc_libs=()
-	if [[ ! ${removing_all} ]]; then
-		local f
-		local tf=${T}/prune-lt-files.pc
-		local pkgconf=$(tc-getPKG_CONFIG)
-
-		while IFS= read -r -d '' f; do # for all .pc files
-			local arg
-
-			sed -e '/^Requires:/d' "${f}" > "${tf}"
-			for arg in $("${pkgconf}" --libs "${tf}"); do
-				[[ ${arg} == -l* ]] && pc_libs+=( lib${arg#-l}.la )
-			done
-		done < <(find "${D}" -type f -name '*.pc' -print0)
-
-		rm -f "${tf}"
-	fi
-
 	local f
+	local queue=()
 	while IFS= read -r -d '' f; do # for all .la files
 		local archivefile=${f/%.la/.a}
 
-		[[ ${f} != ${archivefile} ]] || die 'regex sanity check failed'
+		# The following check is done by libtool itself.
+		# It helps us avoid removing random files which match '*.la',
+		# see bug #468380.
+		if ! sed -n -e '/^# Generated by .*libtool/q0;4q1' "${f}"; then
+			continue
+		fi
 
-		# Remove static libs we're not supposed to link against.
-		if grep -q '^shouldnotlink=yes$' "${f}"; then
+		[[ ${f} != ${archivefile} ]] || die 'regex sanity check failed'
+		local reason= pkgconfig_scanned=
+		local snotlink=$(sed -n -e 's:^shouldnotlink=::p' "${f}")
+
+		if [[ ${snotlink} == yes ]]; then
+
+			# Remove static libs we're not supposed to link against.
 			if [[ -f ${archivefile} ]]; then
 				einfo "Removing unnecessary ${archivefile#${D%/}} (static plugin)"
-				rm -f "${archivefile}"
+				queue+=( "${archivefile}" )
 			fi
 
 			# The .la file may be used by a module loader, so avoid removing it
 			# unless explicitly requested.
-			[[ ${removing_all} ]] || continue
-		fi
+			if [[ ${removing_modules} ]]; then
+				reason='module'
+			fi
 
-		# Remove .la files when:
-		# - user explicitly wants us to remove all .la files,
-		# - respective static archive doesn't exist,
-		# - they are covered by a .pc file already,
-		# - they don't provide any new information (no libs & no flags).
-		local reason
-		if [[ ${removing_all} ]]; then
-			reason='requested'
-		elif [[ ! -f ${archivefile} ]]; then
-			reason='no static archive'
-		elif has "${f##*/}" "${pc_libs[@]}"; then
-			reason='covered by .pc'
-		elif [[ ! $(sed -nre \
-				"s/^(dependency_libs|inherited_linker_flags)='(.*)'$/\2/p" \
-				"${f}") ]]; then
-			reason='no libs & flags'
-		fi
+		else
+
+			# Remove .la files when:
+			# - user explicitly wants us to remove all .la files,
+			# - respective static archive doesn't exist,
+			# - they are covered by a .pc file already,
+			# - they don't provide any new information (no libs & no flags).
+
+			if [[ ${removing_all} ]]; then
+				reason='requested'
+			elif [[ ! -f ${archivefile} ]]; then
+				reason='no static archive'
+			elif [[ ! $(sed -nre \
+					"s/^(dependency_libs|inherited_linker_flags)='(.*)'$/\2/p" \
+					"${f}") ]]; then
+				reason='no libs & flags'
+			else
+				if [[ ! ${pkgconfig_scanned} ]]; then
+					# Create a list of all .pc-covered libs.
+					local pc_libs=()
+					if [[ ! ${removing_all} ]]; then
+						local pc
+						local tf=${T}/prune-lt-files.pc
+						local pkgconf=$(tc-getPKG_CONFIG)
+
+						while IFS= read -r -d '' pc; do # for all .pc files
+							local arg libs
+
+							# Use pkg-config if available (and works),
+							# fallback to sed.
+							if ${pkgconf} --exists "${pc}" &>/dev/null; then
+								sed -e '/^Requires:/d' "${pc}" > "${tf}"
+								libs=$(${pkgconf} --libs "${tf}")
+							else
+								libs=$(sed -ne 's/^Libs://p' "${pc}")
+							fi
+
+							for arg in ${libs}; do
+								if [[ ${arg} == -l* ]]; then
+									if [[ ${arg} == '*$*' ]]; then
+										eqawarn "${FUNCNAME}: variable substitution likely failed in ${pc}"
+										eqawarn "(arg: ${arg})"
+										eqawarn "Most likely, you need to add virtual/pkgconfig to DEPEND."
+									fi
+
+									pc_libs+=( lib${arg#-l}.la )
+								fi
+							done
+						done < <(find "${D}" -type f -name '*.pc' -print0)
+
+						rm -f "${tf}"
+					fi
+
+					pkgconfig_scanned=1
+				fi # pkgconfig_scanned
+
+				has "${f##*/}" "${pc_libs[@]}" && reason='covered by .pc'
+			fi # removal due to .pc
+
+		fi # shouldnotlink==no
 
 		if [[ ${reason} ]]; then
 			einfo "Removing unnecessary ${f#${D%/}} (${reason})"
-			rm -f "${f}"
+			queue+=( "${f}" )
 		fi
-	done < <(find "${D}" -type f -name '*.la' -print0)
+	done < <(find "${ED}" -xtype f -name '*.la' -print0)
+
+	if [[ ${queue[@]} ]]; then
+		rm -f "${queue[@]}"
+	fi
+}
+
+# @FUNCTION: einstalldocs
+# @DESCRIPTION:
+# Install documentation using DOCS and HTML_DOCS.
+#
+# If DOCS is declared and non-empty, all files listed in it are
+# installed. The files must exist, otherwise the function will fail.
+# In EAPI 4 and subsequent EAPIs DOCS may specify directories as well,
+# in other EAPIs using directories is unsupported.
+#
+# If DOCS is not declared, the files matching patterns given
+# in the default EAPI implementation of src_install will be installed.
+# If this is undesired, DOCS can be set to empty value to prevent any
+# documentation from being installed.
+#
+# If HTML_DOCS is declared and non-empty, all files and/or directories
+# listed in it are installed as HTML docs (using dohtml).
+#
+# Both DOCS and HTML_DOCS can either be an array or a whitespace-
+# separated list. Whenever directories are allowed, '<directory>/.' may
+# be specified in order to install all files within the directory
+# without creating a sub-directory in docdir.
+#
+# Passing additional options to dodoc and dohtml is not supported.
+# If you needed such a thing, you need to call those helpers explicitly.
+einstalldocs() {
+	debug-print-function ${FUNCNAME} "${@}"
+
+	local dodoc_opts=-r
+	has ${EAPI} 0 1 2 3 && dodoc_opts=
+
+	if ! declare -p DOCS &>/dev/null ; then
+		local d
+		for d in README* ChangeLog AUTHORS NEWS TODO CHANGES \
+				THANKS BUGS FAQ CREDITS CHANGELOG ; do
+			if [[ -s ${d} ]] ; then
+				dodoc "${d}" || die
+			fi
+		done
+	elif [[ $(declare -p DOCS) == "declare -a"* ]] ; then
+		if [[ ${DOCS[@]} ]] ; then
+			dodoc ${dodoc_opts} "${DOCS[@]}" || die
+		fi
+	else
+		if [[ ${DOCS} ]] ; then
+			dodoc ${dodoc_opts} ${DOCS} || die
+		fi
+	fi
+
+	if [[ $(declare -p HTML_DOCS 2>/dev/null) == "declare -a"* ]] ; then
+		if [[ ${HTML_DOCS[@]} ]] ; then
+			dohtml -r "${HTML_DOCS[@]}" || die
+		fi
+	else
+		if [[ ${HTML_DOCS} ]] ; then
+			dohtml -r ${HTML_DOCS} || die
+		fi
+	fi
+
+	return 0
 }
 
 check_license() { die "you no longer need this as portage supports ACCEPT_LICENSE itself"; }
+
+# @FUNCTION: optfeature
+# @USAGE: <short description> <package atom to match> [other atoms]
+# @DESCRIPTION:
+# Print out a message suggesting an optional package (or packages) which
+# provide the described functionality
+#
+# The following snippet would suggest app-misc/foo for optional foo support,
+# app-misc/bar or app-misc/baz[bar] for optional bar support
+# and either both app-misc/a and app-misc/b or app-misc/c for alphabet support.
+# @CODE
+#	optfeature "foo support" app-misc/foo
+#	optfeature "bar support" app-misc/bar app-misc/baz[bar]
+#	optfeature "alphabet support" "app-misc/a app-misc/b" app-misc/c
+# @CODE
+optfeature() {
+	debug-print-function ${FUNCNAME} "$@"
+	local i j msg
+	local desc=$1
+	local flag=0
+	shift
+	for i; do
+		for j in ${i}; do
+			if has_version "${j}"; then
+				flag=1
+			else
+				flag=0
+				break
+			fi
+		done
+		if [[ ${flag} -eq 1 ]]; then
+			break
+		fi
+	done
+	if [[ ${flag} -eq 0 ]]; then
+		for i; do
+			msg=" "
+			for j in ${i}; do
+				msg+=" ${j} and"
+			done
+			msg="${msg:0: -4} for ${desc}"
+			elog "${msg}"
+		done
+	fi
+}
 
 fi
